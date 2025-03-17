@@ -36,3 +36,40 @@ def query_user_ratings(user_id):
         return None
     finally:
         conn.close()
+
+def query_all_movies():
+    """
+    查询所有电影信息。
+    """
+    print("test")
+    conn = get_db_connection()
+    if conn is None:
+        print("无法建立数据库连接。")
+        return pd.DataFrame()  
+    try:
+        query = 'SELECT * FROM movies;'
+        movies = pd.read_sql_query(query, conn)
+        return movies
+    except Exception as e:
+        print("查询所有电影时出错：", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+def query_all_ratings():
+    """
+    查询所有用户评分数据。
+    """
+    conn = get_db_connection()
+    if conn is None:
+        print("无法建立数据库连接。")
+        return pd.DataFrame()
+    try:
+        query = 'SELECT * FROM ratings;'
+        ratings = pd.read_sql_query(query, conn)
+        return ratings
+    except Exception as e:
+        print("查询所有评分数据时出错：", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
