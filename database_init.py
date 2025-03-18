@@ -16,7 +16,6 @@ def create_engine_postgres():
     
     engine_str = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     engine = create_engine(engine_str)
-    print("Successfully connected to PostgreSQL database on Amazon RDS.")
     return engine
 
 # 3. create tables

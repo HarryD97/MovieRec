@@ -4,3 +4,7 @@ scikit-learn
 scipy
 psycopg2-binary
 flask
+streamlit 
+matplotlib
+seaborn
+plotly

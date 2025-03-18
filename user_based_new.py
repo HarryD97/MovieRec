@@ -28,8 +28,9 @@ def load_data_from_db():
         return None, None
 
     try:
-        ratings_query = 'SELECT "userid", "movieid", "rating", "timestamp" FROM ratings'
-        movies_query = 'SELECT "movieid", "title", "genres" FROM movies'
+        # 修复: 使用与原始文件相同的列名（大写Id）
+        ratings_query = 'SELECT "userId", "movieId", "rating", "timestamp" FROM ratings'
+        movies_query = 'SELECT "movieId", "title", "genres" FROM movies'
         ratings = pd.read_sql_query(ratings_query, conn)
         movies = pd.read_sql_query(movies_query, conn)
         print("Successfully loaded data from database.")
@@ -73,15 +74,16 @@ class EnhancedCF:
 
         count = 0
         for _, row in ratings.iterrows():
-            user = str(row['userid'])
-            movie = str(row['movieid'])
+            # 修复: 使用与原始文件相同的列名（大写Id）
+            user = str(row['userId'])
+            movie = str(row['movieId'])
             rating = float(row['rating'])
             if np.random.random() < self.pivot:
                 self.trainSet.setdefault(user, {})[movie] = rating
                 count += 1
             else:
                 self.testSet.setdefault(user, {})[movie] = rating
-            if count >= 1000000:  # 限制处理的数据量
+            if count >= 500000:  # 限制处理的数据量
                 break
 
         print("Split training and test dataset successfully!")
@@ -242,6 +244,7 @@ class EnhancedCF:
         基于传统协同过滤为目标用户推荐电影。
         """
         if target_user not in self.trainSet or target_user not in self.user_to_idx:
+            print(f"用户 {target_user} 不在训练集中，无法推荐。")
             return []
         
         target_idx = self.user_to_idx[target_user]
@@ -267,7 +270,14 @@ class EnhancedCF:
         """
         基于SVD矩阵分解为目标用户推荐电影。
         """
+        # 修复: 添加更健壮的错误检查
         if target_user not in self.trainSet or target_user not in self.user_to_idx:
+            print(f"用户 {target_user} 不在训练集中，无法推荐。")
+            return []
+            
+        # 修复: 添加SVD矩阵初始化检查
+        if self.user_features is None or self.movie_features is None or self.sigma is None or self.mean_ratings is None:
+            print("SVD矩阵未初始化，无法使用SVD进行推荐。")
             return []
         
         target_idx = self.user_to_idx[target_user]
@@ -276,7 +286,11 @@ class EnhancedCF:
         user_vec = self.user_features[target_idx]
         
         # 预测所有电影的评分
-        pred_ratings = self.mean_ratings[target_idx] + np.dot(user_vec * self.sigma, self.movie_features.T)
+        try:
+            pred_ratings = self.mean_ratings[target_idx] + np.dot(user_vec * self.sigma, self.movie_features.T)
+        except Exception as e:
+            print(f"计算SVD预测评分时出错: {e}")
+            return []
         
         # 过滤掉已观看的电影
         watched_movies = set(self.trainSet[target_user].keys())
@@ -415,58 +429,76 @@ class EnhancedCF:
             model_type: 模型类型 ("svd" 或 "cf")
             sim_method: 相似度方法 ("cosine", "pearson", "manhattan")
         """
-        if filepath is None:
-            if model_type is not None and sim_method is not None:
-                # 根据指定的模型类型和相似度方法构建文件名
-                filepath = f"model/{model_type}_{sim_method.lower()}_model.pkl"
-            else:
-                # 寻找任何可用的模型文件
-                model_files = []
-                for mt in ["svd", "cf"]:
-                    for sm in ["cosine", "pearson", "manhattan"]:
-                        file_path = f"model/{mt}_{sm}_model.pkl"
-                        if os.path.exists(file_path):
-                            model_files.append(file_path)
-                
-                if model_files:
-                    # 默认加载第一个找到的模型文件
-                    filepath = model_files[0]
-                    print(f"未指定模型文件，将加载: {filepath}")
+        try:
+            if filepath is None:
+                if model_type is not None and sim_method is not None:
+                    # 根据指定的模型类型和相似度方法构建文件名
+                    filepath = f"model/{model_type}_{sim_method.lower()}_model.pkl"
                 else:
-                    print("没有找到任何模型文件")
-                    return False
+                    # 寻找任何可用的模型文件
+                    model_files = []
+                    for mt in ["svd", "cf"]:
+                        for sm in ["cosine", "pearson", "manhattan"]:
+                            file_path = f"model/{mt}_{sm}_model.pkl"
+                            if os.path.exists(file_path):
+                                model_files.append(file_path)
+                    
+                    if model_files:
+                        # 默认加载第一个找到的模型文件
+                        filepath = model_files[0]
+                        print(f"未指定模型文件，将加载: {filepath}")
+                    else:
+                        print("没有找到任何模型文件")
+                        return False
+                    
+            if not os.path.exists(filepath):
+                print(f"模型文件 {filepath} 不存在")
+                return False
                 
-        if not os.path.exists(filepath):
-            print(f"模型文件 {filepath} 不存在")
+            with open(filepath, "rb") as f:
+                state = pickle.load(f)
+                
+            # 修复: 添加状态验证检查
+            required_keys = ["trainSet", "user_list", "sim_matrix"]
+            for key in required_keys:
+                if key not in state:
+                    print(f"载入的模型缺少必要的属性: {key}")
+                    return False
+                    
+            self.n_sim_user = state.get("n_sim_user")
+            self.n_rec_movie = state.get("n_rec_movie")
+            self.pivot = state.get("pivot")
+            self.n_factors = state.get("n_factors")
+            self.trainSet = state.get("trainSet")
+            self.testSet = state.get("testSet")
+            self.user_list = state.get("user_list")
+            self.movie_list = state.get("movie_list")
+            self.sim_matrix = state.get("sim_matrix")
+            self.use_svd = state.get("use_svd", False)
+            self.user_to_idx = state.get("user_to_idx")
+            self.movie_to_idx = state.get("movie_to_idx")
+            self.sim_method = state.get("sim_method", "Cosine")  # 默认为余弦相似度
+            
+            if self.use_svd:
+                # 验证SVD特定属性是否存在
+                svd_keys = ["user_features", "movie_features", "sigma", "mean_ratings"]
+                for key in svd_keys:
+                    if key not in state:
+                        print(f"SVD模型缺少必要的属性: {key}")
+                        return False
+                        
+                self.user_features = state.get("user_features")
+                self.movie_features = state.get("movie_features")
+                self.sigma = state.get("sigma")
+                self.mean_ratings = state.get("mean_ratings")
+                
+            print(f"从 {filepath} 加载模型成功")
+            print(f"模型类型: {'SVD' if self.use_svd else '传统协同过滤'}")
+            print(f"相似度方法: {self.sim_method}")
+            return True
+        except Exception as e:
+            print(f"加载模型时出错: {e}")
             return False
-            
-        with open(filepath, "rb") as f:
-            state = pickle.load(f)
-            
-        self.n_sim_user = state.get("n_sim_user")
-        self.n_rec_movie = state.get("n_rec_movie")
-        self.pivot = state.get("pivot")
-        self.n_factors = state.get("n_factors")
-        self.trainSet = state.get("trainSet")
-        self.testSet = state.get("testSet")
-        self.user_list = state.get("user_list")
-        self.movie_list = state.get("movie_list")
-        self.sim_matrix = state.get("sim_matrix")
-        self.use_svd = state.get("use_svd", False)
-        self.user_to_idx = state.get("user_to_idx")
-        self.movie_to_idx = state.get("movie_to_idx")
-        self.sim_method = state.get("sim_method", "Cosine")  # 默认为余弦相似度
-        
-        if self.use_svd:
-            self.user_features = state.get("user_features")
-            self.movie_features = state.get("movie_features")
-            self.sigma = state.get("sigma")
-            self.mean_ratings = state.get("mean_ratings")
-            
-        print(f"从 {filepath} 加载模型成功")
-        print(f"模型类型: {'SVD' if self.use_svd else '传统协同过滤'}")
-        print(f"相似度方法: {self.sim_method}")
-        return True
 
 # --------------------- 3. 使用示例 ---------------------
 if __name__ == '__main__':
@@ -528,6 +560,7 @@ if __name__ == '__main__':
             break
             
         try:
+            # 修复: 确保用户ID格式一致性
             target_user = str(float(target_user))
             
             # 获取推荐结果
@@ -542,6 +575,7 @@ if __name__ == '__main__':
                 # 查询电影详细信息
                 movie_details = query_movie_details(movie)
                 if movie_details is not None and not movie_details.empty:
+                    # 修复: 使用正确的列名访问数据
                     title = movie_details.iloc[0]['title']
                     genres = movie_details.iloc[0]['genres']
                 else:
@@ -554,7 +588,8 @@ if __name__ == '__main__':
             if user_ratings is not None and not user_ratings.empty:
                 top5 = user_ratings.sort_values(by="rating", ascending=False).head(5)
                 for index, row in top5.iterrows():
-                    movie_id = row["movieid"]
+                    # 修复: 使用正确的列名访问数据
+                    movie_id = row["movieId"]  # 改为与原代码一致的大写Id
                     movie_details = query_movie_details(movie_id)
                     if movie_details is not None and not movie_details.empty:
                         title = movie_details.iloc[0]['title']
