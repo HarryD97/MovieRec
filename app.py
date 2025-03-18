@@ -6,6 +6,8 @@ import seaborn as sns
 import os
 import pickle
 import time
+import re
+import requests
 import datetime
 from plotly import graph_objects as go
 from plotly.subplots import make_subplots
@@ -19,6 +21,98 @@ from db_query import (
     query_all_movies,
     query_all_ratings
 )
+
+# OMDb API configuration
+OMDB_API_KEY = "85f65999"  # Replace with your OMDb API key
+
+# Function to get movie IMDb ID from database
+def get_movie_imdb_id(movie_id):
+    """Get the IMDb ID for a specific movie"""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    
+    try:
+        # Convert movie_id to integer
+        movie_id_int = int(float(movie_id))
+        
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT l."imdbId" FROM links l WHERE l."movieId" = %s',
+            (movie_id_int,)
+        )
+        result = cursor.fetchone()
+        
+        if result and result[0]:
+            # Format IMDb ID to have 7 digits with leading zeros
+            imdb_id = f"tt{int(result[0]):07d}"
+            return imdb_id
+        return None
+    except Exception as e:
+        st.error(f"Error fetching IMDb ID: {str(e)}")
+        return None
+    finally:
+        conn.close()
+
+# Function to get movie details from OMDb API
+def get_movie_details_from_omdb(imdb_id):
+    """Fetch movie details from OMDb API using IMDb ID"""
+    if not imdb_id:
+        return None
+    
+    try:
+        url = f"http://www.omdbapi.com/?i={imdb_id}&plot=full&apikey={OMDB_API_KEY}"
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("Response") == "True":
+                return data
+        return None
+    except Exception as e:
+        st.error(f"Error fetching from OMDb API: {str(e)}")
+        return None
+
+# Function to get detailed movie information combining our database and OMDb
+def get_movie_info(movie_id):
+    """Get comprehensive movie information from our database and OMDb API"""
+    conn = get_db_connection()
+    if conn is None:
+        return None, None
+    
+    try:
+        # Convert movie_id to integer
+        movie_id_int = int(float(movie_id))
+        
+        # Get basic movie info from our database
+        query = """
+            SELECT m."movieId", m.title, m.genres, 
+                   AVG(r.rating) as avg_rating, COUNT(r.rating) as rating_count
+            FROM movies m
+            LEFT JOIN ratings r ON m."movieId" = r."movieId"
+            WHERE m."movieId" = %s
+            GROUP BY m."movieId", m.title, m.genres
+        """
+        
+        movie_info = pd.read_sql_query(query, conn, params=(movie_id_int,))
+        
+        if movie_info.empty:
+            return None, None
+        
+        # Get IMDb ID
+        imdb_id = get_movie_imdb_id(movie_id)
+        
+        # Get details from OMDb API
+        omdb_info = None
+        if imdb_id:
+            omdb_info = get_movie_details_from_omdb(imdb_id)
+        
+        return movie_info.iloc[0], omdb_info
+    except Exception as e:
+        st.error(f"Error fetching movie details: {str(e)}")
+        return None, None
+    finally:
+        conn.close()
 
 # Add new function to add or update user ratings
 def add_or_update_rating(user_id, movie_id, rating):
@@ -79,22 +173,6 @@ def get_movies():
     if movies_df.empty:
         st.error("Unable to load movie information from database")
     return movies_df
-
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_sample_ratings():
-    """Get sample ratings data for analysis"""
-    try:
-        # Use SQL to directly limit returned results, avoiding loading the entire ratings table
-        conn = get_db_connection()
-        if conn is None:
-            return pd.DataFrame()
-        query = 'SELECT * FROM ratings ORDER BY random() LIMIT 100000;'
-        ratings_sample = pd.read_sql_query(query, conn)
-        conn.close()
-        return ratings_sample
-    except Exception as e:
-        st.error(f"Error getting ratings sample: {e}")
-        return pd.DataFrame()
 
 # Get list of movie genres
 @st.cache_data(ttl=3600)
@@ -265,14 +343,215 @@ def create_rating_widget(movie_id, current_rating=None):
         format_func=lambda x: f"{'★' * int(x)}{'½' if x % 1 else ''} ({x})"
     )
 
+# Display movie detail page with OMDb details
+def show_movie_detail_page(movie_id, user_id):
+    """Show detailed movie page with OMDb API data and rating options"""
+    # Get movie info from our database and OMDb
+    movie_info, omdb_info = get_movie_info(movie_id)
+    
+    if movie_info is None:
+        st.error("Could not retrieve movie information")
+        return
+    
+    # Get user's current rating for this movie if it exists
+    user_ratings_df = query_user_ratings(user_id)
+    current_rating = None
+    
+    if user_ratings_df is not None and not user_ratings_df.empty:
+        user_movie_rating = user_ratings_df[user_ratings_df['movieId'] == float(movie_id)]
+        if not user_movie_rating.empty:
+            current_rating = user_movie_rating.iloc[0]['rating']
+    
+    # Add custom CSS for movie detail page
+    st.markdown("""
+    <style>
+    .movie-poster {
+        border-radius: 10px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .movie-metadata {
+        color: #666;
+        font-size: 0.9em;
+    }
+    .rating-card {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+    }
+    .imdb-rating {
+        background-color: #f5c518;
+        color: black;
+        font-weight: bold;
+        padding: 2px 8px;
+        border-radius: 4px;
+        display: inline-block;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+        # Back button
+    if st.button("Back to Movies", key="back_button"):
+        st.session_state.show_movie_detail = False
+        st.session_state.selected_movie_id = None
+        st.rerun()
+    st.markdown("---")
+    # Create layout
+    if omdb_info and omdb_info.get("Poster") != "N/A":
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            # Show movie poster with a fixed width to make it smaller
+            st.image(omdb_info.get("Poster"), caption="", width=400)
+    else:
+        col1, col2 = st.columns([0, 1])
+        col2 = st
+    
+    with col2:
+        # Movie title and year
+        if omdb_info:
+            st.title(f"{omdb_info.get('Title')} ({omdb_info.get('Year')})")
+        else:
+            st.title(movie_info['title'])
+        
+        # Basic information row
+        if omdb_info:
+            info_cols = st.columns(3)
+            
+            with info_cols[0]:
+                st.markdown(f"**Runtime:** {omdb_info.get('Runtime', 'N/A')}")
+            with info_cols[1]:
+                st.markdown(f"**Rated:** {omdb_info.get('Rated', 'N/A')}")
+            with info_cols[2]:
+                imdb_rating = omdb_info.get('imdbRating', 'N/A')
+                imdb_votes = omdb_info.get('imdbVotes', 'N/A')
+                st.markdown(f"**IMDb:** <span class='imdb-rating'>{imdb_rating}</span> ({imdb_votes} votes)", unsafe_allow_html=True)
+        
+        # Genres as tags
+        if omdb_info and omdb_info.get('Genre'):
+            genres = omdb_info.get('Genre').split(', ')
+        else:
+            genres = movie_info['genres'].split('|')
+        
+        st.write("**Genres:**")
+        genre_html = " ".join([f'<span style="background-color:#e0e0e0; padding:5px; border-radius:5px; margin-right:5px;">{genre}</span>' for genre in genres])
+        st.markdown(genre_html, unsafe_allow_html=True)
+        
+        # Plot/Summary
+        st.subheader("Plot")
+        if omdb_info and omdb_info.get('Plot') != 'N/A':
+            st.write(omdb_info.get('Plot'))
+        else:
+            st.write("No plot summary available.")
+        
+        # Cast and crew
+        if omdb_info:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Director:**", omdb_info.get('Director', 'N/A'))
+                st.write("**Writer:**", omdb_info.get('Writer', 'N/A'))
+            with col2:
+                st.write("**Actors:**", omdb_info.get('Actors', 'N/A'))
+        
+        # Ratings from different sources
+        if omdb_info and omdb_info.get('Ratings'):
+            st.subheader("Ratings")
+            for rating in omdb_info.get('Ratings', []):
+                st.write(f"**{rating.get('Source')}:** {rating.get('Value')}")
+        
+        # System rating information
+        avg_rating = movie_info['avg_rating'] if 'avg_rating' in movie_info and not pd.isna(movie_info['avg_rating']) else 0
+        rating_count = movie_info['rating_count'] if 'rating_count' in movie_info else 0
+        st.write(f"**Our System:** {avg_rating:.2f}/5.0 ({rating_count:,} ratings)")
+        
+        # Add a divider
+        st.markdown("---")
+        
+        # Link to IMDb
+        if omdb_info:
+            imdb_id = omdb_info.get('imdbID')
+            if imdb_id:
+                imdb_url = f"https://www.imdb.com/title/{imdb_id}"
+                st.markdown(f"[View on IMDb]({imdb_url}) ↗")
+    
+    # Rating section in a separate container
+    st.markdown("---")
+    st.subheader("Rate This Movie")
+    
+    rating_cols = st.columns([3, 2])
+    
+    with rating_cols[0]:
+        # Display current rating
+        if current_rating is not None:
+            st.write(f"Your current rating: **{current_rating}/5.0**")
+            st.write(f"{'★' * int(current_rating)}{'½' if current_rating % 1 else ''}")
+        else:
+            st.write("You haven't rated this movie yet.")
+        
+        # Rating widget
+        user_rating = create_rating_widget(movie_id, current_rating)
+        
+        # Submit button
+        if st.button("Submit Rating"):
+            try:
+                user_id_int = int(float(user_id))
+                movie_id_int = int(float(movie_id))
+                
+                success, message = add_or_update_rating(
+                    user_id_int,
+                    movie_id_int,
+                    user_rating
+                )
+                
+                if success:
+                    st.success(message)
+                    # Update current_rating
+                    current_rating = user_rating
+                else:
+                    st.error(message)
+            except Exception as e:
+                st.error(f"Error submitting rating: {str(e)}")
+    
+    with rating_cols[1]:
+        # Display user activity with this movie
+        if current_rating is not None:
+            st.subheader("Your Activity")
+            
+            # Fetch user-specific info about this movie
+            conn = get_db_connection()
+            if conn is not None:
+                try:
+                    query = """
+                        SELECT timestamp 
+                        FROM ratings 
+                        WHERE "userId" = %s AND "movieId" = %s
+                    """
+                    user_activity = pd.read_sql_query(query, conn, params=(int(float(user_id)), int(float(movie_id))))
+                    conn.close()
+                    
+                    if not user_activity.empty:
+                        # Convert timestamp to readable date
+                        timestamp = user_activity.iloc[0]['timestamp']
+                        date_str = datetime.datetime.fromtimestamp(timestamp).strftime('%B %d, %Y')
+                        st.write(f"You rated this movie on: {date_str}")
+                except Exception as e:
+                    pass
+    
+
+
 # Main application
 def main():
-    # Initialize session state for ratings if it doesn't exist
+    # Initialize session state for ratings and movie detail page
     if 'rating_status' not in st.session_state:
         st.session_state.rating_status = None
     
     if 'rating_message' not in st.session_state:
         st.session_state.rating_message = ""
+    
+    if 'show_movie_detail' not in st.session_state:
+        st.session_state.show_movie_detail = False
+    
+    if 'selected_movie_id' not in st.session_state:
+        st.session_state.selected_movie_id = None
     
     st.set_page_config(
         page_title="Movie Recommendation System",
@@ -344,6 +623,11 @@ def main():
         # Update settings button
         update_settings = st.button("Update Settings")
     
+    # Check if we should show movie detail page
+    if st.session_state.show_movie_detail and st.session_state.selected_movie_id is not None:
+        show_movie_detail_page(st.session_state.selected_movie_id, user_id)
+        return
+    
     # Create tabs
     tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Personalized Recommendations",
@@ -371,7 +655,7 @@ def main():
             if st.button("Clear Message"):
                 st.session_state.rating_status = None
                 st.session_state.rating_message = ""
-                st.rerun()  # Replace st.experimental_rerun()
+                st.rerun()
         
         if model is None:
             st.error("Unable to provide recommendations, model loading failed.")
@@ -434,74 +718,31 @@ def main():
                                 lambda x: any(genre in x for genre in genre_filter)
                             )]
                         
-                        # Display results with rating functionality
+                        # Display results with clickable movie titles
                         if not filtered_df.empty:
-                            # Create two columns for ratings
-                            col1, col2 = st.columns([3, 1])
-                            
-                            with col1:
-                                # Display recommendation table
-                                st.dataframe(
-                                    filtered_df[["Movie ID", "Movie Title", "Genres", "Score", "Current Rating"]],
-                                    column_config={
-                                        "Movie Title": st.column_config.TextColumn("Movie Title", width="large"),
-                                        "Genres": st.column_config.TextColumn("Genres", width="medium"),
-                                        "Score": st.column_config.ProgressColumn(
-                                            "Recommendation Score",
-                                            format="%.2f",
-                                            min_value=0,
-                                            max_value=filtered_df["Score"].max() if not filtered_df.empty else 1
-                                        ),
-                                        "Current Rating": st.column_config.NumberColumn(
-                                            "Your Rating",
-                                            format="%.1f ★"
-                                        )
-                                    },
-                                    hide_index=True
-                                )
-                            
-                            # Rating section
-                            st.subheader("Rate Movies")
-                            st.markdown("Select a movie and provide your rating:")
-                            
-                            # Movie selection for rating
-                            movie_options = {f"{row['Movie ID']} - {row['Movie Title']}": row['Movie ID'] 
-                                           for _, row in filtered_df.iterrows()}
-                            
-                            selected_movie_key = st.selectbox(
-                                "Select Movie to Rate",
-                                options=list(movie_options.keys())
-                            )
-                            
-                            selected_movie_id = movie_options[selected_movie_key]
-                            current_rating = next((row["Current Rating"] 
-                                                  for _, row in filtered_df.iterrows() 
-                                                  if row["Movie ID"] == selected_movie_id), None)
-                            
-                            # Rating widget
-                            user_rating = create_rating_widget(selected_movie_id, current_rating)
-                            
-                            # Submit rating button
-                            if st.button("Submit Rating"):
-                                try:
-                                    user_id_int = int(float(user_id))
-                                    movie_id_int = int(float(selected_movie_id))
-                                    
-                                    # Add or update rating in database
-                                    success, message = add_or_update_rating(
-                                        user_id_int, 
-                                        movie_id_int, 
-                                        user_rating
-                                    )
-                                    
-                                    # Store status in session state
-                                    st.session_state.rating_status = success
-                                    st.session_state.rating_message = message
-                                    
-                                    # Force refresh
-                                    st.rerun()  # Replace st.experimental_rerun()
-                                except Exception as e:
-                                    st.error(f"Error submitting rating: {str(e)}")
+                            # Create custom dataframe with clickable titles
+                            for index, row in filtered_df.iterrows():
+                                col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                                
+                                with col1:
+                                    # Make title clickable
+                                    movie_id = row["Movie ID"]
+                                    if st.button(f"{row['Movie Title']}", key=f"rec_{movie_id}"):
+                                        st.session_state.show_movie_detail = True
+                                        st.session_state.selected_movie_id = movie_id
+                                        st.rerun()
+                                
+                                with col2:
+                                    st.write(row["Genres"])
+                                
+                                with col3:
+                                    st.write(f"Score: {row['Score']:.2f}")
+                                
+                                with col4:
+                                    if row["Current Rating"] is not None:
+                                        st.write(f"Your Rating: {row['Current Rating']}")
+                                    else:
+                                        st.write("Not rated")
                             
                             # Display visualization
                             st.subheader("Genre Distribution of Recommended Movies")
@@ -528,62 +769,29 @@ def main():
                 # Provide cold start solution
                 st.subheader("New User? Start with Popular Movies")
                 
-                # Display popular movies with rating functionality
+                # Display popular movies with clickable titles
                 popular_movies = get_popular_movies(min_ratings=50, top_n=10)
                 if not popular_movies.empty:
                     # Display popular movies
-                    st.dataframe(
-                        popular_movies,
-                        column_config={
-                            "movieId": st.column_config.NumberColumn("Movie ID"),
-                            "title": st.column_config.TextColumn("Movie Title", width="large"),
-                            "genres": st.column_config.TextColumn("Genres", width="medium"),
-                            "avg_rating": st.column_config.NumberColumn("Average Rating", format="%.2f"),
-                            "rating_count": st.column_config.NumberColumn("Number of Ratings")
-                        },
-                        hide_index=True
-                    )
-                    
-                    # Rating section for popular movies
-                    st.subheader("Rate Popular Movies")
-                    st.markdown("Rate some popular movies to get personalized recommendations:")
-                    
-                    # Movie selection for rating popular movies
-                    popular_movie_options = {f"{row['movieId']} - {row['title']}": row['movieId'] 
-                                           for _, row in popular_movies.iterrows()}
-                    
-                    selected_popular_movie_key = st.selectbox(
-                        "Select Movie to Rate",
-                        options=list(popular_movie_options.keys())
-                    )
-                    
-                    selected_popular_movie_id = popular_movie_options[selected_popular_movie_key]
-                    current_pop_rating = user_ratings.get(str(selected_popular_movie_id), None)
-                    
-                    # Rating widget for popular movies
-                    popular_user_rating = create_rating_widget(selected_popular_movie_id, current_pop_rating)
-                    
-                    # Submit rating button for popular movies
-                    if st.button("Submit Rating"):
-                        try:
-                            user_id_int = int(float(user_id))
-                            movie_id_int = int(float(selected_popular_movie_id))
-                            
-                            # Add or update rating in database
-                            success, message = add_or_update_rating(
-                                user_id_int, 
-                                movie_id_int, 
-                                popular_user_rating
-                            )
-                            
-                            # Store status in session state
-                            st.session_state.rating_status = success
-                            st.session_state.rating_message = message
-                            
-                            # Force refresh
-                            st.rerun()  # Replace st.experimental_rerun()
-                        except Exception as e:
-                            st.error(f"Error submitting rating: {str(e)}")
+                    for index, row in popular_movies.iterrows():
+                        col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                        
+                        with col1:
+                            # Make title clickable
+                            movie_id = row["movieId"]
+                            if st.button(f"{row['title']}", key=f"pop_{movie_id}"):
+                                st.session_state.show_movie_detail = True
+                                st.session_state.selected_movie_id = movie_id
+                                st.rerun()
+                        
+                        with col2:
+                            st.write(row["genres"])
+                        
+                        with col3:
+                            st.write(f"Avg Rating: {row['avg_rating']:.2f}")
+                        
+                        with col4:
+                            st.write(f"Ratings: {row['rating_count']}")
                 else:
                     st.warning("Unable to retrieve popular movie data.")
     
@@ -621,78 +829,28 @@ def main():
             fig.update_layout(bargap=0.1)
             st.plotly_chart(fig)
             
-            # User's highest rated movies
+            # User's highest rated movies with clickable titles
             st.subheader("User's Favorite Movies")
             top_rated = user_ratings.sort_values('rating', ascending=False).head(5)
-            top_movies_data = []
             
             for _, row in top_rated.iterrows():
                 movie_details = query_movie_details(row['movieId'])
                 if movie_details is not None and not movie_details.empty:
-                    top_movies_data.append({
-                        "Movie ID": row['movieId'],
-                        "Movie Title": movie_details.iloc[0]['title'],
-                        "Genres": movie_details.iloc[0]['genres'],
-                        "User Rating": row['rating']
-                    })
-            
-            if top_movies_data:
-                st.dataframe(
-                    pd.DataFrame(top_movies_data),
-                    column_config={
-                        "Movie Title": st.column_config.TextColumn("Movie Title", width="large"),
-                        "Genres": st.column_config.TextColumn("Genres", width="medium"),
-                        "User Rating": st.column_config.ProgressColumn(
-                            "Rating",
-                            format="%.1f",
-                            min_value=0,
-                            max_value=5
-                        )
-                    },
-                    hide_index=True
-                )
-                
-                # Add ability to update ratings
-                st.subheader("Update Your Ratings")
-                
-                # Movie selection for updating ratings
-                rated_movie_options = {f"{row['Movie ID']} - {row['Movie Title']}": row['Movie ID'] 
-                                     for _, row in pd.DataFrame(top_movies_data).iterrows()}
-                
-                selected_rated_movie_key = st.selectbox(
-                    "Select Movie to Update Rating",
-                    options=list(rated_movie_options.keys())
-                )
-                
-                selected_rated_movie_id = rated_movie_options[selected_rated_movie_key]
-                current_rated_rating = next((row["User Rating"] 
-                                           for _, row in pd.DataFrame(top_movies_data).iterrows() 
-                                           if row["Movie ID"] == selected_rated_movie_id), None)
-                
-                # Rating widget for updating
-                updated_rating = create_rating_widget(selected_rated_movie_id, current_rated_rating)
-                
-                # Submit updated rating button
-                if st.button("Update Rating"):
-                    try:
-                        user_id_int = int(float(user_id))
-                        movie_id_int = int(float(selected_rated_movie_id))
-                        
-                        # Update rating in database
-                        success, message = add_or_update_rating(
-                            user_id_int, 
-                            movie_id_int, 
-                            updated_rating
-                        )
-                        
-                        # Store status in session state
-                        st.session_state.rating_status = success
-                        st.session_state.rating_message = message
-                        
-                        # Force refresh
-                        st.rerun()  # Replace st.experimental_rerun()
-                    except Exception as e:
-                        st.error(f"Error updating rating: {str(e)}")
+                    col1, col2, col3 = st.columns([3, 2, 1])
+                    
+                    with col1:
+                        # Make title clickable
+                        movie_id = row['movieId']
+                        if st.button(f"{movie_details.iloc[0]['title']}", key=f"fav_{movie_id}"):
+                            st.session_state.show_movie_detail = True
+                            st.session_state.selected_movie_id = movie_id
+                            st.rerun()
+                    
+                    with col2:
+                        st.write(movie_details.iloc[0]['genres'])
+                    
+                    with col3:
+                        st.write(f"Your Rating: {row['rating']}")
             
             # User genre preference analysis
             st.subheader("User Genre Preferences")
@@ -780,7 +938,7 @@ def main():
                 st.write(f"Found {len(filtered_movies)} movies matching criteria")
                 
                 # Pagination
-                items_per_page = 50
+                items_per_page = 20
                 total_pages = (len(filtered_movies) + items_per_page - 1) // items_per_page
                 
                 page = st.number_input(
@@ -795,62 +953,20 @@ def main():
                 
                 page_movies = filtered_movies.iloc[start_idx:end_idx]
                 
-                # Display movies table
-                st.dataframe(
-                    page_movies[['movieId', 'title', 'genres']],
-                    column_config={
-                        "movieId": st.column_config.NumberColumn("Movie ID"),
-                        "title": st.column_config.TextColumn("Movie Title", width="large"),
-                        "genres": st.column_config.TextColumn("Genres", width="medium")
-                    }
-                )
-                
-                # Add rating functionality for explorer tab
-                st.subheader("Rate Movies from Explorer")
-                
-                # Get user's existing ratings
-                user_ratings_df = query_user_ratings(user_id)
-                user_ratings = {}
-                if user_ratings_df is not None and not user_ratings_df.empty:
-                    for _, row in user_ratings_df.iterrows():
-                        user_ratings[str(row['movieId'])] = row['rating']
-                
-                # Movie selection for rating from explorer
-                explorer_movie_options = {f"{row['movieId']} - {row['title']}": row['movieId'] 
-                                        for _, row in page_movies.iterrows()}
-                
-                selected_explorer_movie_key = st.selectbox(
-                    "Select Movie to Rate",
-                    options=list(explorer_movie_options.keys())
-                )
-                
-                selected_explorer_movie_id = explorer_movie_options[selected_explorer_movie_key]
-                current_explorer_rating = user_ratings.get(str(selected_explorer_movie_id), None)
-                
-                # Rating widget for explorer
-                explorer_user_rating = create_rating_widget(selected_explorer_movie_id, current_explorer_rating)
-                
-                # Submit rating button for explorer
-                if st.button("Submit Explorer Rating"):
-                    try:
-                        user_id_int = int(float(user_id))
-                        movie_id_int = int(float(selected_explorer_movie_id))
-                        
-                        # Add or update rating in database
-                        success, message = add_or_update_rating(
-                            user_id_int, 
-                            movie_id_int, 
-                            explorer_user_rating
-                        )
-                        
-                        # Store status in session state
-                        st.session_state.rating_status = success
-                        st.session_state.rating_message = message
-                        
-                        # Force refresh
-                        st.rerun()  # Replace st.experimental_rerun()
-                    except Exception as e:
-                        st.error(f"Error submitting rating: {str(e)}")
+                # Display movies with clickable titles
+                for index, row in page_movies.iterrows():
+                    col1, col2 = st.columns([3, 3])
+                    
+                    with col1:
+                        # Make title clickable
+                        movie_id = row['movieId']
+                        if st.button(f"{row['title']}", key=f"exp_{movie_id}"):
+                            st.session_state.show_movie_detail = True
+                            st.session_state.selected_movie_id = movie_id
+                            st.rerun()
+                    
+                    with col2:
+                        st.write(row['genres'])
                 
                 # Movie genre distribution visualization
                 st.subheader("Genre Distribution in Filtered Results")
