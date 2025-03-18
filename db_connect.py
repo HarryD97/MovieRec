@@ -52,7 +52,6 @@ def initialize_database_indexes():
     cursor.close()
     conn.close()
     print("Successfully create index")
-    return True
     
 if __name__ == "__main__":
     conn = get_db_connection()
