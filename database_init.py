@@ -5,7 +5,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from db_config import DB_CONFIG
 
-data_path = '/home/harry/eep/EEP567/CourseProject/ml-32m'
+data_path = './dataset'
 
 # 2. connect to PostgreSQL database
 def create_engine_postgres():

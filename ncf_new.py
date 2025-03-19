@@ -13,7 +13,13 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 # 检查GPU是否可用，并设置运行设备
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.backends.mps.is_available():
+    device = 'mps'
+elif torch.cuda.is_available():
+    device = 'cuda'
+else:
+    device = 'cpu'
+device = torch.device(device)
 print("使用设备：", device)
 
 # 模型保存路径
@@ -294,7 +300,7 @@ def recommend_movies(model, user_id, ratings_df, movies_df, user2idx, item2idx, 
     # 获取用户已观看电影
     rated_movies = ratings_df[ratings_df["userId"] == user_id]
     if len(rated_movies) == 0:
-        print(f"用户 {user_id} 没有观看记录")
+        # print(f"用户 {user_id} 没有观看记录")
         return None
     
     # 获取用户未观看电影的索引
@@ -396,7 +402,7 @@ def recommend_movies(model, user_id, ratings_df, movies_df, user2idx, item2idx, 
 # -----------------------------
 def main():
     # 预处理数据
-    train_df, val_df, test_df, movies_df, user2idx, item2idx, idx2user, idx2item, num_users, num_items, max_timestamp = preprocess_data()
+    train_df, val_df, test_df, movies_df, user2idx, item2idx, idx2user, idx2item, num_users, num_items, max_timestamp = preprocess_data('./dataset/ratings.csv', './dataset/movies.csv')
     
     # 训练模型（或加载已有模型）
     model, optimizer, trained_epochs = train_time_aware_ncf(

@@ -67,6 +67,7 @@ class EnhancedCF:
         """
         从数据库中加载评分数据，然后按照 pivot 值随机划分为训练集和测试集。
         """
+        rng = np.random.default_rng(seed=42)
         ratings, _ = load_data_from_db()
         if ratings is None:
             print("Failed to load ratings from database.")
@@ -78,7 +79,7 @@ class EnhancedCF:
             user = str(row['userId'])
             movie = str(row['movieId'])
             rating = float(row['rating'])
-            if np.random.random() < self.pivot:
+            if rng.random() < self.pivot:
                 self.trainSet.setdefault(user, {})[movie] = rating
                 count += 1
             else:
@@ -434,7 +435,9 @@ class EnhancedCF:
                 if model_type is not None and sim_method is not None:
                     # 根据指定的模型类型和相似度方法构建文件名
                     filepath = f"model/{model_type}_{sim_method.lower()}_model.pkl"
+                    print("try to load model from", filepath)
                 else:
+                    print("try to load any valid model file")
                     # 寻找任何可用的模型文件
                     model_files = []
                     for mt in ["svd", "cf"]:
