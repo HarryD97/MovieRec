@@ -69,13 +69,30 @@ class TimeAwareNCF(nn.Module):
         # 时间编码转换
         self.time_fc = nn.Linear(1, time_embedding_dim)
         
-    def time_encoding(self, timestamp):
-        """将时间戳转换为嵌入向量"""
-        # 调整形状为 [batch_size, 1]
+    def time_encoding(self, timestamp, k=10.0):
+        """
+        时间编码函数：让更近的时间有更高的权重
+        
+        参数:
+        - timestamp: 归一化的时间戳
+        - k: 控制权重曲线陡峭程度的参数
+        
+        返回:
+        - 时间嵌入向量，近期时间戳有更高的权重
+        """
         time_input = timestamp.unsqueeze(1) if timestamp.dim() == 1 else timestamp
         
-        # 通过全连接层将时间转换为嵌入
+        # 因为timestamp已经归一化到0-1范围，且值越大表示越近
+        # 直接使用sigmoid函数增强时间的新近性权重
+        # 将timestamp缩放到更合适的范围，让sigmoid在近期时间有更明显的区分度
+        recency_weight = torch.sigmoid(k * (time_input - 0.8))
+        
+        # 计算时间嵌入
         time_emb = F.relu(self.time_fc(time_input))
+        
+        # 让时间嵌入乘以新近性权重
+        time_emb = time_emb * recency_weight
+        
         return time_emb
         
     def forward(self, user, item, timestamp):
@@ -121,13 +138,25 @@ def preprocess_data(ratings_path="ratings.csv", movies_path="movies.csv"):
     ratings_df['user_idx'] = ratings_df['userId'].map(user2idx)
     ratings_df['movie_idx'] = ratings_df['movieId'].map(item2idx)
     
-    # 归一化时间戳
+    # 时间戳分析
+    min_timestamp = ratings_df['timestamp'].min()
     max_timestamp = ratings_df['timestamp'].max()
-    ratings_df['normalized_timestamp'] = ratings_df['timestamp'] / max_timestamp
+    time_range = max_timestamp - min_timestamp
+    
+    # 将时间戳归一化到[0,1]区间，值越大表示时间越近
+    ratings_df['normalized_timestamp'] = (ratings_df['timestamp'] - min_timestamp) / time_range
+    
+    # 保存最大和最小时间戳，用于后续推荐
+    timestamp_info = {
+        'min_timestamp': min_timestamp,
+        'max_timestamp': max_timestamp,
+        'time_range': time_range
+    }
     
     num_users = len(unique_users)
     num_items = len(unique_items)
     print("用户数量：", num_users, "电影数量：", num_items)
+    print(f"时间范围: {datetime.fromtimestamp(min_timestamp)} 到 {datetime.fromtimestamp(max_timestamp)}")
     
     # 按时间排序评分数据
     ratings_df = ratings_df.sort_values('timestamp')
@@ -158,7 +187,7 @@ def preprocess_data(ratings_path="ratings.csv", movies_path="movies.csv"):
     
     return (train_df, val_df, test_df, movies_df, 
             user2idx, item2idx, idx2user, idx2item, 
-            num_users, num_items, max_timestamp)
+            num_users, num_items, timestamp_info)
 
 # -----------------------------
 # 训练和评估函数
@@ -285,7 +314,7 @@ def get_user_watching_history(user_id, ratings_df, movies_df):
     user_movies = user_ratings.merge(movies_df, on='movieId')
     return user_movies
 
-def recommend_movies(model, user_id, ratings_df, movies_df, user2idx, item2idx, top_n=5, current_time=None):
+def recommend_movies(model, user_id, ratings_df, movies_df, user2idx, item2idx, timestamp_info, top_n=5, use_current_time=True):
     """使用时间感知NCF模型为用户推荐电影"""
     model.eval()
     
@@ -300,7 +329,7 @@ def recommend_movies(model, user_id, ratings_df, movies_df, user2idx, item2idx, 
     # 获取用户已观看电影
     rated_movies = ratings_df[ratings_df["userId"] == user_id]
     if len(rated_movies) == 0:
-        # print(f"用户 {user_id} 没有观看记录")
+        print(f"用户 {user_id} 没有观看记录")
         return None
     
     # 获取用户未观看电影的索引
@@ -317,9 +346,19 @@ def recommend_movies(model, user_id, ratings_df, movies_df, user2idx, item2idx, 
     item_tensor = torch.tensor(candidate_indices, dtype=torch.long).to(device)
     
     # 使用当前时间或最大时间作为预测时间点
-    if current_time is None:
-        current_time = 1.0  # 使用归一化的最大时间
-    time_tensor = torch.tensor([current_time] * len(candidate_indices), dtype=torch.float).to(device)
+    if use_current_time:
+        # 使用当前时间（归一化到与训练数据相同的范围）
+        current_unix_time = datetime.now().timestamp()
+        # 确保时间戳在合理范围内
+        current_unix_time = min(current_unix_time, timestamp_info['max_timestamp'])
+        current_unix_time = max(current_unix_time, timestamp_info['min_timestamp'])
+        # 归一化
+        normalized_time = (current_unix_time - timestamp_info['min_timestamp']) / timestamp_info['time_range']
+    else:
+        # 使用最大时间（最近的数据点）
+        normalized_time = 1.0
+    
+    time_tensor = torch.tensor([normalized_time] * len(candidate_indices), dtype=torch.float).to(device)
     
     # 预测评分
     with torch.no_grad():
@@ -402,7 +441,7 @@ def recommend_movies(model, user_id, ratings_df, movies_df, user2idx, item2idx, 
 # -----------------------------
 def main():
     # 预处理数据
-    train_df, val_df, test_df, movies_df, user2idx, item2idx, idx2user, idx2item, num_users, num_items, max_timestamp = preprocess_data('./dataset/ratings.csv', './dataset/movies.csv')
+    train_df, val_df, test_df, movies_df, user2idx, item2idx, idx2user, idx2item, num_users, num_items, timestamp_info = preprocess_data('./dataset/ratings.csv', './dataset/movies.csv')
     
     # 训练模型（或加载已有模型）
     model, optimizer, trained_epochs = train_time_aware_ncf(
@@ -443,7 +482,7 @@ def main():
         # 生成推荐
         recommendations = recommend_movies(
             model, user_id, train_df, movies_df, 
-            user2idx, item2idx, top_n=5
+            user2idx, item2idx, timestamp_info, top_n=5, use_current_time=True
         )
         
         if recommendations is not None:
