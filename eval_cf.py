@@ -68,7 +68,7 @@ model_types = ["cf", "svd"]
 sim_methods = ["cosine", "pearson", "manhattan"]
 cf = EnhancedCF(n_sim_user=30, n_rec_movie=10, pivot=0.8, n_factors=35, sim_method='cosine')
 cf.get_dataset()
-# 获取所有的movie id
+# get all the movie id from dataset
 movie_set = set()
 for movie_to_rating in cf.testSet.values():
     movie_set.update(movie_to_rating.keys())
@@ -78,7 +78,7 @@ movie_list = list(movie_set)
 
 like_threshold = 4.0
 movies_df = pd.read_csv('./dataset/movies.csv')
-# 获取数据集中所有的genre
+# get all the genres from dataset
 genres = movies_df['genres'].tolist()
 genres_set = set()
 for g in genres:
